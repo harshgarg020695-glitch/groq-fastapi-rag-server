@@ -10,12 +10,13 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_community.document_loaders import TextLoader
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # Load environment logic reliably
 load_dotenv()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+HF_TOKEN = os.environ.get("HF_TOKEN")
 DATA_FILE = "data.txt"
 
 # --- TASK 6: INTEGRATION ---
@@ -37,7 +38,10 @@ def build_deployment_rag():
     docs = loader.load()
     split_docs = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50).split_documents(docs)
     
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    embeddings = HuggingFaceEndpointEmbeddings(
+        model="sentence-transformers/all-MiniLM-L6-v2",
+        huggingfacehub_api_token=HF_TOKEN,
+    )
     vectorstore = FAISS.from_documents(split_docs, embeddings)
     retriever = vectorstore.as_retriever()
     
