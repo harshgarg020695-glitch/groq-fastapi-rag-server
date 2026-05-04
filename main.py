@@ -57,7 +57,7 @@ def build_deployment_rag():
     )
     return rag_chain
 
-rag_chain = build_deployment_rag()
+rag_chain = None  # loaded lazily on first /chat request
 
 # --- TASK 5: CREATING A FAST API APPLICATION ---
 @asynccontextmanager
@@ -141,9 +141,12 @@ class ChatResponse(BaseModel):
 # --- TASK 6: CONTINUED (INTEGRATING POST ENDPOINT) ---
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
+    global rag_chain
     if not GROQ_API_KEY or GROQ_API_KEY == "YOUR_GROQ_API_KEY_HERE":
         raise HTTPException(status_code=500, detail="WARNING: GROQ_API_KEY is missing! Follow the README to add your key to the .env file.")
-        
+
+    if rag_chain is None:
+        rag_chain = build_deployment_rag()
     if not rag_chain:
         raise HTTPException(status_code=500, detail="WARNING: RAG Integration failed to build. Ensure data.txt is configured.")
         
