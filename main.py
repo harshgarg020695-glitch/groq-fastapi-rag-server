@@ -1,6 +1,7 @@
 import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -13,156 +14,155 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# Load environment logic reliably
 load_dotenv()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 DATA_FILE = "data.txt"
 
-# --- TASK 6: INTEGRATION ---
-# Core logic bridging the local database into an operational Groq deployment for backend endpoints
-def build_deployment_rag():
-    try:
-        llm = ChatGroq(
-            temperature=0, 
-            model_name="llama-3.1-8b-instant", 
-            api_key=GROQ_API_KEY or "dummy_key" 
-        )
-    except Exception:
-        return None
-        
-    if not os.path.exists(DATA_FILE):
-        return None
-        
+rag_chain = None  # loaded lazily on first /chat request
+
+
+def build_rag_chain():
+    llm = ChatGroq(
+        temperature=0,
+        model_name="llama-3.1-8b-instant",
+        api_key=GROQ_API_KEY,
+    )
+
     loader = TextLoader(DATA_FILE)
     docs = loader.load()
-    split_docs = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50).split_documents(docs)
-    
+    chunks = RecursiveCharacterTextSplitter(
+        chunk_size=500, chunk_overlap=50
+    ).split_documents(docs)
+
     embeddings = HuggingFaceEndpointEmbeddings(
         model="sentence-transformers/all-MiniLM-L6-v2",
         huggingfacehub_api_token=HF_TOKEN,
     )
-    vectorstore = FAISS.from_documents(split_docs, embeddings)
-    retriever = vectorstore.as_retriever()
-    
-    # Prompt template for Groq RAG specifically tuned for integration 
-    rag_prompt = ChatPromptTemplate.from_template("""
-    Answer the following question based ONLY on the provided context.
-    Context: {context}
-    
-    Question: {question}
-    """)
-    
-    rag_chain = (
+    retriever = FAISS.from_documents(chunks, embeddings).as_retriever()
+
+    prompt = ChatPromptTemplate.from_template(
+        "Answer the following question based ONLY on the provided context.\n\n"
+        "Context: {context}\n\n"
+        "Question: {question}"
+    )
+
+    return (
         {"context": retriever, "question": RunnablePassthrough()}
-        | rag_prompt
+        | prompt
         | llm
         | StrOutputParser()
     )
-    return rag_chain
 
-rag_chain = None  # loaded lazily on first /chat request
 
-# --- TASK 5: CREATING A FAST API APPLICATION ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
 
-# Utilizing the app structure specifically engineered for serving AI
-from fastapi.responses import HTMLResponse
 
-app = FastAPI(title="Gen AI - Task 5 Server Initialization", lifespan=lifespan)
+app = FastAPI(
+    title="Groq FastAPI RAG Server",
+    description=(
+        "Production-grade REST API serving a Retrieval-Augmented Generation pipeline. "
+        "POST a question to /chat and get a grounded answer from the AI knowledge base, "
+        "powered by Groq LPU inference (llama-3.1-8b-instant) and FAISS vector search."
+    ),
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
-@app.get("/")
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root():
-    html_content = """
+    return """
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Groq RAG Chatbot</title>
+        <title>Groq RAG Server</title>
         <style>
-            body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; }
-            #chatbox { width: 100%; height: 300px; border: 1px solid #ccc; padding: 10px; overflow-y: scroll; margin-bottom: 10px; }
-            #question { width: 80%; padding: 10px; }
-            button { padding: 10px; width: 15%; }
-            .user-msg { color: blue; margin-bottom: 5px; }
-            .bot-msg { color: green; margin-bottom: 15px; }
+            body { font-family: Arial, sans-serif; max-width: 640px; margin: 50px auto; }
+            h2 { margin-bottom: 4px; }
+            p.sub { color: #666; font-size: 0.9em; margin-top: 0; }
+            #chatbox { width: 100%; height: 320px; border: 1px solid #ccc; padding: 12px;
+                       overflow-y: scroll; margin-bottom: 10px; border-radius: 4px; box-sizing: border-box; }
+            #question { width: 82%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; }
+            button { padding: 10px 14px; background: #4f46e5; color: #fff; border: none;
+                     border-radius: 4px; cursor: pointer; }
+            .user-msg { color: #1d4ed8; margin-bottom: 4px; }
+            .bot-msg  { color: #166534; margin-bottom: 14px; }
+            .err-msg  { color: #dc2626; margin-bottom: 14px; }
         </style>
     </head>
     <body>
-        <h2>Groq RAG Chatbot (Task 7 Integration)</h2>
+        <h2>Groq RAG Server</h2>
+        <p class="sub">Ask anything about AI, ML, NLP, LLMs, RAG, or computer vision.</p>
         <div id="chatbox"></div>
-        <input type="text" id="question" placeholder="Ask a question about the document..."/>
-        <button onclick="askQuestion()">Send</button>
-
+        <input type="text" id="question" placeholder="e.g. How does RAG reduce hallucinations?" />
+        <button onclick="ask()">Send</button>
         <script>
-            async function askQuestion() {
-                const questionInput = document.getElementById("question");
-                const chatbox = document.getElementById("chatbox");
-                
-                const q = questionInput.value;
+            async function ask() {
+                const input = document.getElementById("question");
+                const box   = document.getElementById("chatbox");
+                const q = input.value.trim();
                 if (!q) return;
-                
-                chatbox.innerHTML += `<div class="user-msg"><b>You:</b> ${q}</div>`;
-                questionInput.value = "";
-                
-                chatbox.innerHTML += `<div class="bot-msg" id="loading"><b>Bot:</b> Thinking...</div>`;
-                
+                input.value = "";
+                box.innerHTML += `<div class="user-msg"><b>You:</b> ${q}</div>`;
+                box.innerHTML += `<div class="bot-msg" id="loading"><b>Bot:</b> Thinking…</div>`;
+                box.scrollTop = box.scrollHeight;
                 try {
-                    const response = await fetch("/chat", {
+                    const res  = await fetch("/chat", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ question: q })
                     });
-                    
-                    const data = await response.json();
+                    const data = await res.json();
                     document.getElementById("loading").remove();
-                    
-                    if (response.ok) {
-                        chatbox.innerHTML += `<div class="bot-msg"><b>Bot:</b> ${data.answer}</div>`;
+                    if (res.ok) {
+                        box.innerHTML += `<div class="bot-msg"><b>Bot:</b> ${data.answer}</div>`;
                     } else {
-                        chatbox.innerHTML += `<div class="bot-msg" style="color:red;"><b>Error:</b> ${data.detail}</div>`;
+                        box.innerHTML += `<div class="err-msg"><b>Error:</b> ${data.detail}</div>`;
                     }
-                } catch (error) {
+                } catch {
                     document.getElementById("loading").remove();
-                    chatbox.innerHTML += `<div class="bot-msg" style="color:red;"><b>Error:</b> Failed to reach server.</div>`;
+                    box.innerHTML += `<div class="err-msg"><b>Error:</b> Could not reach server.</div>`;
                 }
-                
-                chatbox.scrollTop = chatbox.scrollHeight;
+                box.scrollTop = box.scrollHeight;
             }
+            document.getElementById("question").addEventListener("keydown", e => {
+                if (e.key === "Enter") ask();
+            });
         </script>
     </body>
     </html>
     """
-    return HTMLResponse(content=html_content)
+
 
 class ChatRequest(BaseModel):
     question: str
 
+
 class ChatResponse(BaseModel):
     answer: str
 
-# --- TASK 6: CONTINUED (INTEGRATING POST ENDPOINT) ---
-@app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
-    global rag_chain
-    if not GROQ_API_KEY or GROQ_API_KEY == "YOUR_GROQ_API_KEY_HERE":
-        raise HTTPException(status_code=500, detail="WARNING: GROQ_API_KEY is missing! Follow the README to add your key to the .env file.")
 
+@app.post("/chat", response_model=ChatResponse, summary="Ask a question against the knowledge base")
+async def chat_endpoint(request: ChatRequest):
+    """
+    Retrieve relevant chunks from the FAISS index and generate a grounded answer via Groq.
+    First call initialises the RAG chain (embeddings + vector index) — expect ~5s latency.
+    """
+    global rag_chain
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured on this server.")
     if rag_chain is None:
-        rag_chain = build_deployment_rag()
-    if not rag_chain:
-        raise HTTPException(status_code=500, detail="WARNING: RAG Integration failed to build. Ensure data.txt is configured.")
-        
+        rag_chain = build_rag_chain()
     try:
-        # Pushing integration directly through dynamic LCEL execution mapped to FastApi return objects
         answer = rag_chain.invoke(request.question)
         return ChatResponse(answer=answer)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- TASK 5 and TASK 6 (Deployment App Logic) ---
+
 if __name__ == "__main__":
     import uvicorn
-    # Initializing deployment listener
     uvicorn.run(app, host="0.0.0.0", port=8000)
